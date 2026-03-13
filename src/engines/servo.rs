@@ -117,18 +117,12 @@ impl Default for Servo {
 }
 
 impl Servo {
-    fn find_view(&self, id: ViewId) -> &ServoView {
-        self.views
-            .iter()
-            .find(|v| v.id == id)
-            .expect("The requested View id was not found")
+    fn find_view(&self, id: ViewId) -> Option<&ServoView> {
+        self.views.iter().find(|v| v.id == id)
     }
 
-    fn find_view_mut(&mut self, id: ViewId) -> &mut ServoView {
-        self.views
-            .iter_mut()
-            .find(|v| v.id == id)
-            .expect("The requested View id was not found")
+    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut ServoView> {
+        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -209,7 +203,9 @@ impl Engine for Servo {
 
     fn request_render(&mut self, id: ViewId, _size: Size<u32>) {
         let rc = Rc::clone(&self.rendering_context);
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         if view.needs_render {
             capture_frame(view, &rc);
         }
@@ -322,7 +318,9 @@ impl Engine for Servo {
     }
 
     fn handle_keyboard_event(&mut self, id: ViewId, event: keyboard::Event) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         if let Some(kb) = iced_keyboard_to_servo(event) {
             view.webview.notify_input_event(InputEvent::Keyboard(kb));
         }
@@ -330,13 +328,15 @@ impl Engine for Servo {
 
     fn handle_mouse_event(&mut self, id: ViewId, point: Point, event: mouse::Event) {
         let device_point = DevicePoint::new(point.x, point.y);
-        self.find_view_mut(id).last_cursor = device_point;
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
+        view.last_cursor = device_point;
 
         match event {
             mouse::Event::ButtonPressed(button) => {
                 if let Some(servo_btn) = iced_button_to_servo(button) {
-                    self.find_view_mut(id)
-                        .webview
+                    view.webview
                         .notify_input_event(InputEvent::MouseButton(MouseButtonEvent {
                             action: MouseButtonAction::Down,
                             button: servo_btn,
@@ -346,8 +346,7 @@ impl Engine for Servo {
             }
             mouse::Event::ButtonReleased(button) => {
                 if let Some(servo_btn) = iced_button_to_servo(button) {
-                    self.find_view_mut(id)
-                        .webview
+                    view.webview
                         .notify_input_event(InputEvent::MouseButton(MouseButtonEvent {
                             action: MouseButtonAction::Up,
                             button: servo_btn,
@@ -356,14 +355,14 @@ impl Engine for Servo {
                 }
             }
             mouse::Event::CursorMoved { .. } => {
-                self.find_view_mut(id)
-                    .webview
+                view.webview
                     .notify_input_event(InputEvent::MouseMove(MouseMoveEvent {
                         point: WebViewPoint::Device(device_point),
                         is_compatibility_event_for_touch: false,
                     }));
             }
             mouse::Event::WheelScrolled { delta } => {
+                drop(view);
                 self.scroll(id, delta);
             }
             _ => {}
@@ -371,7 +370,9 @@ impl Engine for Servo {
     }
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         let (dx, dy, mode) = match delta {
             mouse::ScrollDelta::Lines { x, y } => (x as f64, y as f64, WheelMode::DeltaLine),
             mouse::ScrollDelta::Pixels { x, y } => (x as f64, y as f64, WheelMode::DeltaPixel),
@@ -390,7 +391,9 @@ impl Engine for Servo {
     }
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         match page_type {
             PageType::Url(url) => {
                 if let Ok(parsed) = Url::parse(&url) {
@@ -411,19 +414,27 @@ impl Engine for Servo {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        self.find_view(id).webview.reload();
+        if let Some(view) = self.find_view(id) {
+            view.webview.reload();
+        }
     }
 
     fn go_forward(&mut self, id: ViewId) {
-        self.find_view(id).webview.go_forward(1);
+        if let Some(view) = self.find_view(id) {
+            view.webview.go_forward(1);
+        }
     }
 
     fn go_back(&mut self, id: ViewId) {
-        self.find_view(id).webview.go_back(1);
+        if let Some(view) = self.find_view(id) {
+            view.webview.go_back(1);
+        }
     }
 
     fn get_url(&self, id: ViewId) -> String {
-        let view = self.find_view(id);
+        let Some(view) = self.find_view(id) else {
+            return "about:blank".to_string();
+        };
         if let Some(url) = view.webview.url() {
             url.to_string()
         } else if view.url.is_empty() {
@@ -434,18 +445,23 @@ impl Engine for Servo {
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        let view = self.find_view(id);
+        let Some(view) = self.find_view(id) else {
+            return String::new();
+        };
         view.webview
             .page_title()
             .unwrap_or_else(|| view.title.clone())
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id).cursor
+        self.find_view(id)
+            .map(|v| v.cursor)
+            .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
-        &self.find_view(id).last_frame
+        static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
+        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 }
 

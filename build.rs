@@ -9,7 +9,7 @@ fn main() {
         if let Ok(out_dir) = std::env::var("OUT_DIR") {
             let build_dir = std::path::Path::new(&out_dir)
                 .ancestors()
-                .find(|p| p.file_name().map_or(false, |n| n == "build"));
+                .find(|p| p.file_name().is_some_and(|n| n == "build"));
 
             if let Some(build_dir) = build_dir {
                 if let Ok(entries) = std::fs::read_dir(build_dir) {

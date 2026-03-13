@@ -87,7 +87,14 @@ impl DocumentContainer for WebviewContainer {
     fn text_width(&self, text: &str, font: FontHandle) -> f32 {
         self.inner.text_width(text, font)
     }
-    fn draw_text(&mut self, hdc: DrawContext, text: &str, font: FontHandle, color: Color, pos: Position) {
+    fn draw_text(
+        &mut self,
+        hdc: DrawContext,
+        text: &str,
+        font: FontHandle,
+        color: Color,
+        pos: Position,
+    ) {
         self.inner.draw_text(hdc, text, font, color, pos);
     }
     fn draw_list_marker(&mut self, hdc: DrawContext, marker: &ListMarker) {
@@ -135,7 +142,13 @@ impl DocumentContainer for WebviewContainer {
     ) {
         self.inner.draw_conic_gradient(hdc, layer, gradient);
     }
-    fn draw_borders(&mut self, hdc: DrawContext, borders: &Borders, draw_pos: Position, root: bool) {
+    fn draw_borders(
+        &mut self,
+        hdc: DrawContext,
+        borders: &Borders,
+        draw_pos: Position,
+        root: bool,
+    ) {
         self.inner.draw_borders(hdc, borders, draw_pos, root);
     }
     fn set_caption(&mut self, caption: &str) {
@@ -194,9 +207,11 @@ impl DocumentContainer for WebviewContainer {
 /// To avoid aliasing UB, `doc_state` is temporarily taken out (`Option::take`)
 /// whenever the container is accessed directly. This ensures only one `&mut`
 /// to the container data exists at a time.
+type MeasureFn = Box<dyn Fn(&str, FontHandle) -> f32>;
+
 struct DocumentState {
     doc: Document<'static>,
-    measure: Box<dyn Fn(&str, FontHandle) -> f32>,
+    measure: MeasureFn,
     selection: Selection<'static>,
 }
 
@@ -244,18 +259,12 @@ impl Default for Litehtml {
 }
 
 impl Litehtml {
-    fn find_view(&self, id: ViewId) -> &LitehtmlView {
-        self.views
-            .iter()
-            .find(|v| v.id == id)
-            .expect("The requested View id was not found")
+    fn find_view(&self, id: ViewId) -> Option<&LitehtmlView> {
+        self.views.iter().find(|v| v.id == id)
     }
 
-    fn find_view_mut(&mut self, id: ViewId) -> &mut LitehtmlView {
-        self.views
-            .iter_mut()
-            .find(|v| v.id == id)
-            .expect("The requested View id was not found")
+    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut LitehtmlView> {
+        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -335,7 +344,6 @@ fn rebuild_document(view: &mut LitehtmlView) {
                 match Document::from_html(&view.html, container_ref2, None, None) {
                     Err(e) => {
                         eprintln!("litehtml: from_html pass 2 failed: {e:?}");
-                        return;
                     }
                     Ok(mut doc2) => {
                         let _ = doc2.render(w as f32);
@@ -540,14 +548,18 @@ impl Engine for Litehtml {
     }
 
     fn request_render(&mut self, id: ViewId, _size: Size<u32>) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         if view.needs_render {
             render_view(view);
         }
     }
 
     fn flush_staged_images(&mut self, id: ViewId, _size: Size<u32>) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         if !view.staged_images.is_empty() {
             render_view(view);
         }
@@ -645,7 +657,9 @@ impl Engine for Litehtml {
                 self.scroll(id, delta);
             }
             mouse::Event::ButtonPressed(mouse::Button::Left) => {
-                let view = self.find_view_mut(id);
+                let Some(view) = self.find_view_mut(id) else {
+                    return;
+                };
                 view.drag_origin = Some((point.x, point.y));
                 view.drag_active = false;
                 if let Some(ref mut state) = view.doc_state {
@@ -656,7 +670,9 @@ impl Engine for Litehtml {
                 view.selection_rects.clear();
             }
             mouse::Event::CursorMoved { .. } => {
-                let view = self.find_view_mut(id);
+                let Some(view) = self.find_view_mut(id) else {
+                    return;
+                };
 
                 // Notify litehtml of mouse movement for :hover and cursor updates
                 if let Some(ref mut state) = view.doc_state {
@@ -704,7 +720,9 @@ impl Engine for Litehtml {
                 }
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                let view = self.find_view_mut(id);
+                let Some(view) = self.find_view_mut(id) else {
+                    return;
+                };
                 let was_dragging = view.drag_active;
                 view.drag_active = false;
                 view.drag_origin = None;
@@ -723,18 +741,21 @@ impl Engine for Litehtml {
                 }
             }
             mouse::Event::CursorLeft => {
-                let view = self.find_view_mut(id);
-                if let Some(ref mut state) = view.doc_state {
-                    state.doc.on_mouse_leave();
+                if let Some(view) = self.find_view_mut(id) {
+                    if let Some(ref mut state) = view.doc_state {
+                        state.doc.on_mouse_leave();
+                    }
+                    view.cursor = Interaction::Idle;
                 }
-                view.cursor = Interaction::Idle;
             }
             _ => {}
         }
     }
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         match delta {
             mouse::ScrollDelta::Lines { y, .. } => {
                 view.scroll_y -= y * 40.0;
@@ -748,7 +769,9 @@ impl Engine for Litehtml {
     }
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         match page_type {
             PageType::Html(html) => {
                 view.doc_state = None;
@@ -758,6 +781,7 @@ impl Engine for Litehtml {
                 view.container.inner_mut().clear_pending_images();
                 // Clear image baseurls from the previous page
                 view.container.image_baseurls.borrow_mut().clear();
+                view.selection_rects.clear();
 
                 view.html = html;
                 view.scroll_y = 0.0;
@@ -774,7 +798,9 @@ impl Engine for Litehtml {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         view.doc_state = None;
 
         view.needs_render = true;
@@ -789,36 +815,43 @@ impl Engine for Litehtml {
     }
 
     fn get_url(&self, id: ViewId) -> String {
-        let url = &self.find_view(id).url;
-        if url.is_empty() {
+        let Some(view) = self.find_view(id) else {
+            return "about:blank".to_string();
+        };
+        if view.url.is_empty() {
             "about:blank".to_string()
         } else {
-            url.clone()
+            view.url.clone()
         }
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        self.find_view(id).title.clone()
+        self.find_view(id)
+            .map(|v| v.title.clone())
+            .unwrap_or_default()
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id).cursor
+        self.find_view(id)
+            .map(|v| v.cursor)
+            .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
-        &self.find_view(id).last_frame
+        static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
+        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 
     fn get_scroll_y(&self, id: ViewId) -> f32 {
-        self.find_view(id).scroll_y
+        self.find_view(id).map(|v| v.scroll_y).unwrap_or(0.0)
     }
 
     fn get_content_height(&self, id: ViewId) -> f32 {
-        self.find_view(id).content_height
+        self.find_view(id).map(|v| v.content_height).unwrap_or(0.0)
     }
 
     fn get_selected_text(&self, id: ViewId) -> Option<String> {
-        self.find_view(id)
+        self.find_view(id)?
             .doc_state
             .as_ref()?
             .selection
@@ -826,11 +859,14 @@ impl Engine for Litehtml {
     }
 
     fn get_selection_rects(&self, id: ViewId) -> &[[f32; 4]] {
-        &self.find_view(id).selection_rects
+        static EMPTY: &[[f32; 4]] = &[];
+        self.find_view(id)
+            .map(|v| v.selection_rects.as_slice())
+            .unwrap_or(EMPTY)
     }
 
     fn take_anchor_click(&mut self, id: ViewId) -> Option<String> {
-        let view = self.find_view_mut(id);
+        let view = self.find_view_mut(id)?;
         // Take doc_state out to avoid aliasing with container.
         let doc_state = view.doc_state.take();
         let result = view.container.inner_mut().take_anchor_click();
@@ -865,13 +901,22 @@ impl Engine for Litehtml {
         bytes: &[u8],
         redraw_on_ready: bool,
     ) {
-        let view = self.find_view_mut(id);
-        view.staged_images
-            .push((url.to_string(), bytes.to_vec(), redraw_on_ready));
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
+        if let Some(existing) = view.staged_images.iter_mut().find(|(u, _, _)| u == url) {
+            existing.1 = bytes.to_vec();
+            existing.2 = redraw_on_ready;
+        } else {
+            view.staged_images
+                .push((url.to_string(), bytes.to_vec(), redraw_on_ready));
+        }
     }
 
     fn set_css_cache(&mut self, id: ViewId, cache: HashMap<String, String>) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         // Take doc_state out to avoid aliasing with container.
         let doc_state = view.doc_state.take();
         view.container.set_css_cache(cache);
@@ -879,7 +924,9 @@ impl Engine for Litehtml {
     }
 
     fn scroll_to_fragment(&mut self, id: ViewId, fragment: &str) -> bool {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return false;
+        };
         let state = match view.doc_state.as_ref() {
             Some(s) => s,
             None => return false,

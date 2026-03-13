@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.5] - 2026-03-13
+
+### Added
+- Blitz keyboard event handling — translates iced key events to blitz, enabling form interaction
+- Blitz right-click, middle-click, back/forward mouse button support
+- Blitz dark mode detection via `ICED_WEBVIEW_COLOR_SCHEME` env var and `GTK_THEME` fallback
+- CEF mouse modifier tracking (Shift, Ctrl, Alt passed to mouse events)
+
+### Fixed
+- All engines: invalid ViewId no longer panics — `find_view` returns Option with graceful fallback
+- Blitz frame comparison now uses hash instead of full pixel buffer diff
+- CEF child processes (zygote, GPU, network service) left running after exit — added proper shutdown
+- Litehtml selection rectangles cleared on page navigation
+- Litehtml image staging deduplicates by URL (last write wins)
+
 ## [0.1.4] - 2026-02-23
 
 ### Fixed

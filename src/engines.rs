@@ -45,7 +45,7 @@ pub type ViewId = usize;
 
 /// Trait to handle multiple browser engines
 /// Currently only supports cpu renders via pixel_buffer
-/// Passing a View id that does not exist will cause a panic
+/// Passing a View id that does not exist is handled gracefully (no-op / defaults)
 pub trait Engine {
     /// Used to do work in the actual browser engine
     fn update(&mut self);

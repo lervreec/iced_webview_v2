@@ -1,3 +1,4 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use iced::keyboard;
@@ -15,14 +16,15 @@ use blitz_html::HtmlDocument;
 use blitz_net::Provider;
 use blitz_paint::paint_scene;
 use blitz_traits::events::{
-    BlitzPointerEvent, BlitzPointerId, MouseEventButton, MouseEventButtons, PointerCoords,
-    PointerDetails, UiEvent,
+    BlitzKeyEvent, BlitzPointerEvent, BlitzPointerId, KeyState, MouseEventButton,
+    MouseEventButtons, PointerCoords, PointerDetails, UiEvent,
 };
 use blitz_traits::navigation::{NavigationOptions, NavigationProvider};
 use blitz_traits::net::NetProvider;
 use blitz_traits::shell::{ColorScheme, ShellProvider, Viewport};
 use cursor_icon::CursorIcon;
 use keyboard_types::Modifiers;
+use smol_str::SmolStr;
 
 /// Captures link clicks from the Blitz document.
 struct LinkCapture(Arc<Mutex<Option<String>>>);
@@ -54,6 +56,7 @@ struct BlitzView {
     title: String,
     cursor: Interaction,
     last_frame: ImageInfo,
+    last_frame_hash: u64,
     needs_render: bool,
     /// Number of update ticks to keep draining resources after goto().
     /// blitz_net fetches sub-resources (images, CSS) asynchronously; we need
@@ -73,6 +76,22 @@ struct BlitzView {
 pub struct Blitz {
     views: Vec<BlitzView>,
     scale_factor: f32,
+    color_scheme: ColorScheme,
+}
+
+fn detect_color_scheme() -> ColorScheme {
+    if let Ok(val) = std::env::var("ICED_WEBVIEW_COLOR_SCHEME") {
+        return match val.to_lowercase().as_str() {
+            "dark" => ColorScheme::Dark,
+            _ => ColorScheme::Light,
+        };
+    }
+    if let Ok(theme) = std::env::var("GTK_THEME") {
+        if theme.to_lowercase().contains("dark") {
+            return ColorScheme::Dark;
+        }
+    }
+    ColorScheme::Light
 }
 
 impl Default for Blitz {
@@ -80,23 +99,18 @@ impl Default for Blitz {
         Self {
             views: Vec::new(),
             scale_factor: 1.0,
+            color_scheme: detect_color_scheme(),
         }
     }
 }
 
 impl Blitz {
-    fn find_view(&self, id: ViewId) -> &BlitzView {
-        self.views
-            .iter()
-            .find(|v| v.id == id)
-            .expect("The requested View id was not found")
+    fn find_view(&self, id: ViewId) -> Option<&BlitzView> {
+        self.views.iter().find(|v| v.id == id)
     }
 
-    fn find_view_mut(&mut self, id: ViewId) -> &mut BlitzView {
-        self.views
-            .iter_mut()
-            .find(|v| v.id == id)
-            .expect("The requested View id was not found")
+    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut BlitzView> {
+        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -131,6 +145,7 @@ fn create_document(
     shell: &Arc<WebviewShell>,
     size: Size<u32>,
     scale: f32,
+    color_scheme: ColorScheme,
 ) -> HtmlDocument {
     let phys_w = (size.width as f32 * scale) as u32;
     let phys_h = (size.height as f32 * scale) as u32;
@@ -144,7 +159,7 @@ fn create_document(
         net_provider: Some(Arc::clone(net)),
         navigation_provider: Some(Arc::clone(nav) as Arc<dyn NavigationProvider>),
         shell_provider: Some(Arc::clone(shell) as Arc<dyn ShellProvider>),
-        viewport: Some(Viewport::new(phys_w, phys_h, scale, ColorScheme::Light)),
+        viewport: Some(Viewport::new(phys_w, phys_h, scale, color_scheme)),
         ..Default::default()
     };
 
@@ -203,18 +218,20 @@ fn render_view(view: &mut BlitzView) {
         render_h,
     );
 
-    // Only swap the frame when pixels actually changed. This prevents
-    // visual flicker during the resource drain phase when resolve() is
-    // called periodically but no new resources have arrived yet.
+    let mut hasher = DefaultHasher::new();
+    buffer.hash(&mut hasher);
+    let new_hash = hasher.finish();
+
     if view.last_frame.image_width() == render_w
         && view.last_frame.image_height() == render_h
-        && *view.last_frame.pixels() == buffer
+        && view.last_frame_hash == new_hash
     {
         view.needs_render = false;
         return;
     }
 
     view.last_frame = ImageInfo::new(buffer, PixelFormat::Rgba, render_w, render_h);
+    view.last_frame_hash = new_hash;
     view.needs_render = false;
 }
 
@@ -266,7 +283,9 @@ impl Engine for Blitz {
     }
 
     fn request_render(&mut self, id: ViewId, _size: Size<u32>) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         if view.needs_render {
             render_view(view);
         }
@@ -301,6 +320,7 @@ impl Engine for Blitz {
                 &shell,
                 size,
                 self.scale_factor,
+                self.color_scheme,
             ))
         } else {
             None
@@ -317,6 +337,7 @@ impl Engine for Blitz {
             title: String::new(),
             cursor: Interaction::Idle,
             last_frame: ImageInfo::blank(w, h),
+            last_frame_hash: 0,
             needs_render: true,
             resource_ticks: if has_document {
                 RESOURCE_TICK_BUDGET
@@ -386,11 +407,20 @@ impl Engine for Blitz {
         }
     }
 
-    fn handle_keyboard_event(&mut self, _id: ViewId, _event: keyboard::Event) {
-        // TODO: blitz-dom supports keyboard events (text input, Tab focus,
-        // copy/paste) via UiEvent::KeyDown/KeyUp — we need to translate iced
-        // keyboard::Event into BlitzKeyEvent and call
-        // doc.handle_ui_event(UiEvent::KeyDown(..)) here.
+    fn handle_keyboard_event(&mut self, id: ViewId, event: keyboard::Event) {
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
+        if let Some(ref mut doc) = view.document {
+            if let Some(ke) = iced_keyboard_to_blitz(event) {
+                let ui_event = if ke.state == KeyState::Pressed {
+                    UiEvent::KeyDown(ke)
+                } else {
+                    UiEvent::KeyUp(ke)
+                };
+                doc.handle_ui_event(ui_event);
+            }
+        }
     }
 
     fn handle_mouse_event(&mut self, id: ViewId, point: Point, event: mouse::Event) {
@@ -398,8 +428,22 @@ impl Engine for Blitz {
             mouse::Event::WheelScrolled { delta } => {
                 self.scroll(id, delta);
             }
-            mouse::Event::ButtonPressed(mouse::Button::Left) => {
-                let view = self.find_view_mut(id);
+            mouse::Event::ButtonPressed(btn) => {
+                let (button, buttons) = match btn {
+                    mouse::Button::Left => (MouseEventButton::Main, MouseEventButtons::Primary),
+                    mouse::Button::Right => {
+                        (MouseEventButton::Secondary, MouseEventButtons::Secondary)
+                    }
+                    mouse::Button::Middle => {
+                        (MouseEventButton::Auxiliary, MouseEventButtons::Auxiliary)
+                    }
+                    mouse::Button::Back => (MouseEventButton::Fourth, MouseEventButtons::Fourth),
+                    mouse::Button::Forward => (MouseEventButton::Fifth, MouseEventButtons::Fifth),
+                    _ => return,
+                };
+                let Some(view) = self.find_view_mut(id) else {
+                    return;
+                };
                 if let Some(ref mut doc) = view.document {
                     let doc_y = point.y + view.scroll_y;
                     doc.handle_ui_event(UiEvent::PointerDown(BlitzPointerEvent {
@@ -413,15 +457,17 @@ impl Engine for Blitz {
                             client_x: point.x,
                             client_y: point.y,
                         },
-                        button: MouseEventButton::Main,
-                        buttons: MouseEventButtons::Primary,
+                        button,
+                        buttons,
                         mods: Modifiers::empty(),
                         details: PointerDetails::default(),
                     }));
                 }
             }
             mouse::Event::CursorMoved { .. } => {
-                let view = self.find_view_mut(id);
+                let Some(view) = self.find_view_mut(id) else {
+                    return;
+                };
                 if let Some(ref mut doc) = view.document {
                     let doc_y = point.y + view.scroll_y;
                     doc.set_hover_to(point.x, doc_y);
@@ -431,8 +477,18 @@ impl Engine for Blitz {
                 let icon = doc_cursor.unwrap_or(shell_cursor);
                 view.cursor = cursor_icon_to_interaction(icon);
             }
-            mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                let view = self.find_view_mut(id);
+            mouse::Event::ButtonReleased(btn) => {
+                let button = match btn {
+                    mouse::Button::Left => MouseEventButton::Main,
+                    mouse::Button::Right => MouseEventButton::Secondary,
+                    mouse::Button::Middle => MouseEventButton::Auxiliary,
+                    mouse::Button::Back => MouseEventButton::Fourth,
+                    mouse::Button::Forward => MouseEventButton::Fifth,
+                    _ => return,
+                };
+                let Some(view) = self.find_view_mut(id) else {
+                    return;
+                };
                 if let Some(ref mut doc) = view.document {
                     let doc_y = point.y + view.scroll_y;
                     doc.handle_ui_event(UiEvent::PointerUp(BlitzPointerEvent {
@@ -446,7 +502,7 @@ impl Engine for Blitz {
                             client_x: point.x,
                             client_y: point.y,
                         },
-                        button: MouseEventButton::Main,
+                        button,
                         buttons: MouseEventButtons::None,
                         mods: Modifiers::empty(),
                         details: PointerDetails::default(),
@@ -454,15 +510,18 @@ impl Engine for Blitz {
                 }
             }
             mouse::Event::CursorLeft => {
-                let view = self.find_view_mut(id);
-                view.cursor = Interaction::Idle;
+                if let Some(view) = self.find_view_mut(id) {
+                    view.cursor = Interaction::Idle;
+                }
             }
             _ => {}
         }
     }
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         match delta {
             mouse::ScrollDelta::Lines { y, .. } => {
                 view.scroll_y -= y * 40.0;
@@ -476,7 +535,10 @@ impl Engine for Blitz {
     }
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
-        let view = self.find_view_mut(id);
+        let color_scheme = self.color_scheme;
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         match page_type {
             PageType::Html(html) => {
                 let nav = Arc::new(LinkCapture(Arc::clone(&view.nav_capture)));
@@ -487,7 +549,14 @@ impl Engine for Blitz {
                 view.net_provider = Arc::clone(&net);
 
                 view.document = Some(create_document(
-                    &html, &view.url, &net, &nav, &shell, view.size, view.scale,
+                    &html,
+                    &view.url,
+                    &net,
+                    &nav,
+                    &shell,
+                    view.size,
+                    view.scale,
+                    color_scheme,
                 ));
                 view.scroll_y = 0.0;
                 view.needs_render = true;
@@ -500,7 +569,9 @@ impl Engine for Blitz {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return;
+        };
         if let Some(ref mut doc) = view.document {
             doc.resolve(0.0);
         }
@@ -512,36 +583,45 @@ impl Engine for Blitz {
     fn go_back(&mut self, _id: ViewId) {}
 
     fn get_url(&self, id: ViewId) -> String {
-        let url = &self.find_view(id).url;
-        if url.is_empty() {
+        let Some(view) = self.find_view(id) else {
+            return "about:blank".to_string();
+        };
+        if view.url.is_empty() {
             "about:blank".to_string()
         } else {
-            url.clone()
+            view.url.clone()
         }
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        self.find_view(id).title.clone()
+        self.find_view(id)
+            .map(|v| v.title.clone())
+            .unwrap_or_default()
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id).cursor
+        self.find_view(id)
+            .map(|v| v.cursor)
+            .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
-        &self.find_view(id).last_frame
+        static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
+        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 
     fn get_scroll_y(&self, id: ViewId) -> f32 {
-        self.find_view(id).scroll_y
+        self.find_view(id).map(|v| v.scroll_y).unwrap_or(0.0)
     }
 
     fn get_content_height(&self, id: ViewId) -> f32 {
-        self.find_view(id).content_height
+        self.find_view(id).map(|v| v.content_height).unwrap_or(0.0)
     }
 
     fn scroll_to_fragment(&mut self, id: ViewId, fragment: &str) -> bool {
-        let view = self.find_view_mut(id);
+        let Some(view) = self.find_view_mut(id) else {
+            return false;
+        };
         let doc = match view.document.as_ref() {
             Some(d) => d,
             None => return false,
@@ -568,6 +648,100 @@ impl Engine for Blitz {
     }
 
     fn take_anchor_click(&mut self, id: ViewId) -> Option<String> {
-        self.find_view_mut(id).nav_capture.lock().unwrap().take()
+        self.find_view_mut(id)?.nav_capture.lock().unwrap().take()
+    }
+}
+
+fn iced_keyboard_to_blitz(event: keyboard::Event) -> Option<BlitzKeyEvent> {
+    use keyboard_types::{Code, Key, Location};
+
+    let (state, iced_key, iced_mods) = match event {
+        keyboard::Event::KeyPressed { key, modifiers, .. } => (KeyState::Pressed, key, modifiers),
+        keyboard::Event::KeyReleased { key, modifiers, .. } => (KeyState::Released, key, modifiers),
+        _ => return None,
+    };
+
+    let kt_key = iced_key_to_blitz_key(&iced_key)?;
+
+    let mut mods = Modifiers::empty();
+    if iced_mods.shift() {
+        mods |= Modifiers::SHIFT;
+    }
+    if iced_mods.control() {
+        mods |= Modifiers::CONTROL;
+    }
+    if iced_mods.alt() {
+        mods |= Modifiers::ALT;
+    }
+    if iced_mods.logo() {
+        mods |= Modifiers::META;
+    }
+
+    let text = if state == KeyState::Pressed {
+        match &kt_key {
+            Key::Character(s) => Some(SmolStr::new(s)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    Some(BlitzKeyEvent {
+        key: kt_key,
+        code: Code::Unidentified,
+        modifiers: mods,
+        location: Location::Standard,
+        is_auto_repeating: false,
+        is_composing: false,
+        state,
+        text,
+    })
+}
+
+fn iced_key_to_blitz_key(key: &keyboard::Key) -> Option<keyboard_types::Key> {
+    use keyboard::key::Named;
+
+    match key {
+        keyboard::Key::Character(s) => Some(keyboard_types::Key::Character(s.to_string())),
+        keyboard::Key::Named(named) => {
+            let k = match named {
+                Named::Enter => keyboard_types::Key::Enter,
+                Named::Tab => keyboard_types::Key::Tab,
+                Named::Space => keyboard_types::Key::Character(" ".to_string()),
+                Named::Backspace => keyboard_types::Key::Backspace,
+                Named::Delete => keyboard_types::Key::Delete,
+                Named::Escape => keyboard_types::Key::Escape,
+                Named::Insert => keyboard_types::Key::Insert,
+                Named::CapsLock => keyboard_types::Key::CapsLock,
+                Named::NumLock => keyboard_types::Key::NumLock,
+                Named::ScrollLock => keyboard_types::Key::ScrollLock,
+                Named::Pause => keyboard_types::Key::Pause,
+                Named::PrintScreen => keyboard_types::Key::PrintScreen,
+                Named::ContextMenu => keyboard_types::Key::ContextMenu,
+                Named::ArrowDown => keyboard_types::Key::ArrowDown,
+                Named::ArrowLeft => keyboard_types::Key::ArrowLeft,
+                Named::ArrowRight => keyboard_types::Key::ArrowRight,
+                Named::ArrowUp => keyboard_types::Key::ArrowUp,
+                Named::End => keyboard_types::Key::End,
+                Named::Home => keyboard_types::Key::Home,
+                Named::PageDown => keyboard_types::Key::PageDown,
+                Named::PageUp => keyboard_types::Key::PageUp,
+                Named::F1 => keyboard_types::Key::F1,
+                Named::F2 => keyboard_types::Key::F2,
+                Named::F3 => keyboard_types::Key::F3,
+                Named::F4 => keyboard_types::Key::F4,
+                Named::F5 => keyboard_types::Key::F5,
+                Named::F6 => keyboard_types::Key::F6,
+                Named::F7 => keyboard_types::Key::F7,
+                Named::F8 => keyboard_types::Key::F8,
+                Named::F9 => keyboard_types::Key::F9,
+                Named::F10 => keyboard_types::Key::F10,
+                Named::F11 => keyboard_types::Key::F11,
+                Named::F12 => keyboard_types::Key::F12,
+                _ => return None,
+            };
+            Some(k)
+        }
+        _ => None,
     }
 }

@@ -3539,6 +3539,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rustls",
+ "smol_str 0.3.6",
  "tokio",
  "url",
  "urlencoding",
