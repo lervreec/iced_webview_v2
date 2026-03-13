@@ -188,8 +188,12 @@ impl DocumentContainer for WebviewContainer {
 ///
 /// The `doc` field borrows from the `Box<WebviewContainer>` in the parent
 /// `LitehtmlView`. The container is heap-allocated for address stability.
-/// `doc_state` is always dropped before the container is modified or dropped
-/// (field drop order: `doc_state` is declared before `container`).
+/// `doc_state` is declared before `container` in `LitehtmlView` for correct
+/// drop order — it must be dropped first.
+///
+/// To avoid aliasing UB, `doc_state` is temporarily taken out (`Option::take`)
+/// whenever the container is accessed directly. This ensures only one `&mut`
+/// to the container data exists at a time.
 struct DocumentState {
     doc: Document<'static>,
     measure: Box<dyn Fn(&str, usize) -> f32>,
@@ -362,47 +366,44 @@ fn rebuild_document(view: &mut LitehtmlView) {
 /// Draw the document into the pixel buffer and capture `last_frame`.
 ///
 /// Resizes the container to fit the full content height, disables CSS
-/// overflow clips, draws, then captures the pixels. The caller provides
-/// a raw `container_ptr` when the container must be mutated while the
-/// Document holds a borrow (flush path); pass `None` for the normal path
-/// where no aliasing is needed.
-fn capture_frame(view: &mut LitehtmlView, container_ptr: Option<*mut WebviewContainer>) {
+/// overflow clips, draws, then captures the pixels.
+///
+/// To avoid aliasing UB, the document is temporarily taken out of
+/// `doc_state` while the container is mutated (resize, clip flags),
+/// then restored for the `draw` call, and taken out again for cleanup.
+fn capture_frame(view: &mut LitehtmlView) {
     let w = view.size.width;
-    let full_h = (view.content_height.ceil() as u32).max(view.size.height);
+    let full_h = (view.content_height.ceil() as u32).max(1);
 
-    // Resize + set_ignore_overflow_clips: use the raw pointer when provided
-    // (Document holds a borrow), otherwise go through the safe reference.
-    match container_ptr {
-        Some(ptr) => unsafe {
-            (*ptr).inner_mut().resize(w, full_h);
-            (*ptr).inner_mut().set_ignore_overflow_clips(true);
-        },
-        None => {
-            view.container.inner_mut().resize(w, full_h);
-            view.container.inner_mut().set_ignore_overflow_clips(true);
-        }
-    }
+    // Take doc_state out so we can safely mutate the container.
+    let doc_state = view.doc_state.take();
 
-    if let Some(ref mut state) = view.doc_state {
+    view.container.inner_mut().resize(w, full_h);
+    view.container.inner_mut().set_ignore_overflow_clips(true);
+
+    // Restore doc_state and draw.
+    view.doc_state = doc_state;
+    if let Some(ref mut ds) = view.doc_state {
         let clip = Position {
             x: 0.0,
             y: 0.0,
             width: w as f32,
             height: full_h as f32,
         };
-        state.doc.draw(0, 0.0, 0.0, Some(clip));
+        ds.doc.draw(0, 0.0, 0.0, Some(clip));
     }
 
-    match container_ptr {
-        Some(ptr) => unsafe { (*ptr).inner_mut().set_ignore_overflow_clips(false) },
-        None => view.container.inner_mut().set_ignore_overflow_clips(false),
-    }
+    // Take doc_state out again to safely access the container.
+    let doc_state = view.doc_state.take();
+    view.container.inner_mut().set_ignore_overflow_clips(false);
 
     let phys_w = view.container.inner().width();
     let phys_h = view.container.inner().height();
     let pixels = unpremultiply_rgba(view.container.inner().pixels());
     view.last_frame = ImageInfo::new(pixels, PixelFormat::Rgba, phys_w, phys_h);
     view.needs_render = false;
+
+    view.doc_state = doc_state;
 }
 
 /// Render the full document into the pixel buffer and update `last_frame`.
@@ -410,21 +411,19 @@ fn capture_frame(view: &mut LitehtmlView, container_ptr: Option<*mut WebviewCont
 /// The buffer covers the entire content height so the widget can scroll
 /// by offsetting the draw position — no re-render needed per scroll.
 fn draw_view(view: &mut LitehtmlView) {
-    capture_frame(view, None);
+    capture_frame(view);
 }
 
-/// Flush staged image bytes into the container, optionally re-layout, and
-/// redraw in one pass.
+/// Flush staged image bytes into the container and redraw.
 ///
-/// Avoids re-parsing HTML — only calls `doc.render()` (when needed) which is
-/// cheap compared to `Document::from_html`.
+/// Drops the document first to release its borrow on the container, loads
+/// the image data safely, then rebuilds the document from the stored HTML.
+/// This avoids all mutable aliasing — the previous approach used raw
+/// pointers to mutate the container while the Document held a `&mut` borrow,
+/// which was undefined behavior under Rust's aliasing rules.
 ///
-/// # Safety
-///
-/// Uses a raw pointer to mutate the container while the Document holds a
-/// `&'static mut` borrow. Safe in practice because `load_image_data` only
-/// touches the `images` HashMap, which the Document does not access until
-/// the next `render()` / `draw()` call that we control.
+/// The rebuild cost is acceptable: `Document::from_html` + `render` is fast
+/// for typical HTML, and this path only runs when async image fetches complete.
 fn flush_images_and_redraw(view: &mut LitehtmlView) {
     if view.staged_images.is_empty() {
         return;
@@ -435,26 +434,17 @@ fn flush_images_and_redraw(view: &mut LitehtmlView) {
         return;
     }
 
-    // If ANY image has redraw_on_ready == false, layout may have changed
-    // (e.g. <img> without explicit dimensions). Otherwise we can skip
-    // the expensive doc.render() and just redraw.
-    let needs_render = view.staged_images.iter().any(|(_, _, ror)| !ror);
+    // Drop the document to release its borrow on the container.
+    view.doc_state = None;
 
-    // SAFETY: The Document borrows the container but doesn't access `images`
-    // right now. We only touch the `images` HashMap via `load_image_data`.
-    let container_ptr = &mut *view.container as *mut WebviewContainer;
+    // Now safe to mutate the container — no Document holds a borrow.
     for (url, bytes, _) in view.staged_images.drain(..) {
-        unsafe { (*container_ptr).inner_mut().load_image_data(&url, &bytes) };
+        view.container.inner_mut().load_image_data(&url, &bytes);
     }
 
-    if needs_render {
-        if let Some(ref mut state) = view.doc_state {
-            let _ = state.doc.render(w as f32);
-            view.content_height = state.doc.height();
-        }
-    }
-
-    capture_frame(view, Some(container_ptr));
+    // Rebuild the document from stored HTML (includes render + draw).
+    rebuild_document(view);
+    capture_frame(view);
 }
 
 /// Main render entry point: rebuilds the document if needed, then draws.
@@ -673,7 +663,10 @@ impl Engine for Litehtml {
                     let doc_y = point.y + view.scroll_y;
                     state.doc.on_mouse_over(point.x, doc_y, point.x, point.y);
                 }
+                // Take doc_state out to avoid aliasing while reading cursor.
+                let doc_state = view.doc_state.take();
                 view.cursor = css_cursor_to_interaction(view.container.inner().cursor());
+                view.doc_state = doc_state;
 
                 if let Some((ox, oy)) = view.drag_origin {
                     let dx = point.x - ox;
@@ -721,9 +714,12 @@ impl Engine for Litehtml {
                     let doc_y = point.y + view.scroll_y;
                     state.doc.on_lbutton_up(point.x, doc_y, point.x, point.y);
                 }
-                // Discard anchor clicks produced during text selection
+                // Discard anchor clicks produced during text selection.
+                // Take doc_state out to avoid aliasing with container.
                 if was_dragging {
+                    let doc_state = view.doc_state.take();
                     view.container.inner_mut().take_anchor_click();
+                    view.doc_state = doc_state;
                 }
             }
             mouse::Event::CursorLeft => {
@@ -768,7 +764,10 @@ impl Engine for Litehtml {
                 view.needs_render = true;
             }
             PageType::Url(url) => {
+                // Take doc_state out to avoid aliasing with container.
+                let doc_state = view.doc_state.take();
                 view.container.base_url = url.clone();
+                view.doc_state = doc_state;
                 view.url = url;
             }
         }
@@ -815,8 +814,7 @@ impl Engine for Litehtml {
     }
 
     fn get_content_height(&self, id: ViewId) -> f32 {
-        let view = self.find_view(id);
-        view.content_height.max(view.size.height as f32)
+        self.find_view(id).content_height
     }
 
     fn get_selected_text(&self, id: ViewId) -> Option<String> {
@@ -832,15 +830,19 @@ impl Engine for Litehtml {
     }
 
     fn take_anchor_click(&mut self, id: ViewId) -> Option<String> {
-        self.find_view_mut(id)
-            .container
-            .inner_mut()
-            .take_anchor_click()
+        let view = self.find_view_mut(id);
+        // Take doc_state out to avoid aliasing with container.
+        let doc_state = view.doc_state.take();
+        let result = view.container.inner_mut().take_anchor_click();
+        view.doc_state = doc_state;
+        result
     }
 
     fn take_pending_images(&mut self) -> Vec<(ViewId, String, String, bool)> {
         let mut result = Vec::new();
         for view in &mut self.views {
+            // Take doc_state out to avoid aliasing with container.
+            let doc_state = view.doc_state.take();
             for (src, redraw_on_ready) in view.container.inner_mut().take_pending_images() {
                 let baseurl = view
                     .container
@@ -851,6 +853,7 @@ impl Engine for Litehtml {
                     .unwrap_or_default();
                 result.push((view.id, src, baseurl, redraw_on_ready));
             }
+            view.doc_state = doc_state;
         }
         result
     }
@@ -869,7 +872,10 @@ impl Engine for Litehtml {
 
     fn set_css_cache(&mut self, id: ViewId, cache: HashMap<String, String>) {
         let view = self.find_view_mut(id);
+        // Take doc_state out to avoid aliasing with container.
+        let doc_state = view.doc_state.take();
         view.container.set_css_cache(cache);
+        view.doc_state = doc_state;
     }
 
     fn scroll_to_fragment(&mut self, id: ViewId, fragment: &str) -> bool {

@@ -207,10 +207,11 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                     .request_render(self.index_as_view_id(index), self.view_size);
             }
             Action::CloseCurrentView => {
-                self.engine.remove_view(self.get_current_view_id());
-                self.view_ids.remove(self.current_view_index.expect(
+                let idx = self.current_view_index.expect(
                     "The current view index is not currently set. Ensure you call the Action prior",
-                ));
+                );
+                self.engine.remove_view(self.get_current_view_id());
+                self.view_ids.remove(idx);
                 self.current_view_index = None;
                 if let Some(on_view_close) = &self.on_close_view {
                     tasks.push(Task::done(on_view_close.clone()));
@@ -219,6 +220,15 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
             Action::CloseView(index) => {
                 self.engine.remove_view(self.index_as_view_id(index));
                 self.view_ids.remove(index as usize);
+
+                // Adjust current_view_index after removal
+                if let Some(current) = self.current_view_index {
+                    if current == index as usize {
+                        self.current_view_index = None;
+                    } else if current > index as usize {
+                        self.current_view_index = Some(current - 1);
+                    }
+                }
 
                 if let Some(on_view_close) = &self.on_close_view {
                     tasks.push(Task::done(on_view_close.clone()))
