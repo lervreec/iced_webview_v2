@@ -102,7 +102,9 @@ wrap_render_handler! {
         ) {
             let w = width as usize;
             let h = height as usize;
-            let len = w * h * 4;
+            let Some(len) = (w.checked_mul(h)).and_then(|n| n.checked_mul(4)) else {
+                return;
+            };
             let pixels = unsafe { std::slice::from_raw_parts(buffer, len) }.to_vec();
             self.shared.borrow_mut().frame_buffer = Some((pixels, width as u32, height as u32));
         }

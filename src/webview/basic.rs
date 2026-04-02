@@ -81,20 +81,14 @@ where
 }
 
 impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView<Engine, Message> {
-    fn get_current_view_id(&self) -> ViewId {
-        *self
-            .view_ids
-            .get(self.current_view_index.expect(
-                "The current view index is not currently set. Ensure you call the Action prior",
-            ))
-            .expect("Could find view index for current view. Maybe its already been closed?")
+    fn get_current_view_id(&self) -> Option<ViewId> {
+        self.current_view_index
+            .and_then(|idx| self.view_ids.get(idx))
+            .copied()
     }
 
-    fn index_as_view_id(&self, index: u32) -> usize {
-        *self
-            .view_ids
-            .get(index as usize)
-            .expect("Failed to find that index, maybe its already been closed?")
+    fn index_as_view_id(&self, index: u32) -> Option<usize> {
+        self.view_ids.get(index as usize).copied()
     }
 }
 
@@ -183,16 +177,16 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
     pub fn update(&mut self, action: Action) -> Task<Message> {
         let mut tasks = Vec::new();
 
-        if self.current_view_index.is_some() {
+        if let Some(view_id) = self.get_current_view_id() {
             if let Some(on_url_change) = &self.on_url_change {
-                let url = self.engine.get_url(self.get_current_view_id());
+                let url = self.engine.get_url(view_id);
                 if self.url != url {
                     self.url = url.clone();
                     tasks.push(Task::done(on_url_change(url)))
                 }
             }
             if let Some(on_title_change) = &self.on_title_change {
-                let title = self.engine.get_title(self.get_current_view_id());
+                let title = self.engine.get_title(view_id);
                 if self.title != title {
                     self.title = title.clone();
                     tasks.push(Task::done(on_title_change(title)))
@@ -202,36 +196,56 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
 
         match action {
             Action::ChangeView(index) => {
-                self.current_view_index = Some(index as usize);
-                self.engine
-                    .request_render(self.index_as_view_id(index), self.view_size);
+                if let Some(view_id) = self.index_as_view_id(index) {
+                    self.current_view_index = Some(index as usize);
+                    self.engine.request_render(view_id, self.view_size);
+                } else {
+                    eprintln!(
+                        "iced_webview: ChangeView index {} is invalid or already closed",
+                        index
+                    );
+                }
             }
             Action::CloseCurrentView => {
-                let idx = self.current_view_index.expect(
-                    "The current view index is not currently set. Ensure you call the Action prior",
-                );
-                self.engine.remove_view(self.get_current_view_id());
-                self.view_ids.remove(idx);
-                self.current_view_index = None;
-                if let Some(on_view_close) = &self.on_close_view {
-                    tasks.push(Task::done(on_view_close.clone()));
+                if let Some(idx) = self.current_view_index {
+                    if let Some(view_id) = self.get_current_view_id() {
+                        self.engine.remove_view(view_id);
+                        self.view_ids.remove(idx);
+                        self.current_view_index = None;
+                        if let Some(on_view_close) = &self.on_close_view {
+                            tasks.push(Task::done(on_view_close.clone()));
+                        }
+                    } else {
+                        eprintln!(
+                            "iced_webview: CloseCurrentView failed — view index {} is stale",
+                            idx
+                        );
+                        self.current_view_index = None;
+                    }
                 }
             }
             Action::CloseView(index) => {
-                self.engine.remove_view(self.index_as_view_id(index));
-                self.view_ids.remove(index as usize);
+                if let Some(view_id) = self.index_as_view_id(index) {
+                    self.engine.remove_view(view_id);
+                    self.view_ids.remove(index as usize);
 
-                // Adjust current_view_index after removal
-                if let Some(current) = self.current_view_index {
-                    if current == index as usize {
-                        self.current_view_index = None;
-                    } else if current > index as usize {
-                        self.current_view_index = Some(current - 1);
+                    // Adjust current_view_index after removal
+                    if let Some(current) = self.current_view_index {
+                        if current == index as usize {
+                            self.current_view_index = None;
+                        } else if current > index as usize {
+                            self.current_view_index = Some(current - 1);
+                        }
                     }
-                }
 
-                if let Some(on_view_close) = &self.on_close_view {
-                    tasks.push(Task::done(on_view_close.clone()))
+                    if let Some(on_view_close) = &self.on_close_view {
+                        tasks.push(Task::done(on_view_close.clone()))
+                    }
+                } else {
+                    eprintln!(
+                        "iced_webview: CloseView index {} is invalid or already closed",
+                        index
+                    );
                 }
             }
             Action::CreateView(page_type) => {
@@ -271,75 +285,88 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                 }
             }
             Action::GoBackward => {
-                self.engine.go_back(self.get_current_view_id());
+                if let Some(view_id) = self.get_current_view_id() {
+                    self.engine.go_back(view_id);
+                }
             }
             Action::GoForward => {
-                self.engine.go_forward(self.get_current_view_id());
+                if let Some(view_id) = self.get_current_view_id() {
+                    self.engine.go_forward(view_id);
+                }
             }
             Action::GoToUrl(url) => {
-                self.inflight_images = 0;
-                let view_id = self.get_current_view_id();
-                let epoch = self.nav_epochs.entry(view_id).or_insert(0);
-                *epoch = epoch.wrapping_add(1);
-                let url_str = url.to_string();
-                self.engine.goto(view_id, PageType::Url(url_str.clone()));
+                if let Some(view_id) = self.get_current_view_id() {
+                    self.inflight_images = 0;
+                    let epoch = self.nav_epochs.entry(view_id).or_insert(0);
+                    *epoch = epoch.wrapping_add(1);
+                    let url_str = url.to_string();
+                    self.engine.goto(view_id, PageType::Url(url_str.clone()));
 
-                #[cfg(any(feature = "litehtml", feature = "blitz"))]
-                if !self.engine.handles_urls() {
-                    if let Some(mapper) = &self.action_mapper {
-                        let mapper = mapper.clone();
-                        let fetch_url = url_str.clone();
-                        tasks.push(Task::perform(
-                            crate::fetch::fetch_html(fetch_url),
-                            move |result| mapper(Action::FetchComplete(view_id, url_str, result)),
-                        ));
-                    } else {
+                    #[cfg(any(feature = "litehtml", feature = "blitz"))]
+                    if !self.engine.handles_urls() {
+                        if let Some(mapper) = &self.action_mapper {
+                            let mapper = mapper.clone();
+                            let fetch_url = url_str.clone();
+                            tasks.push(Task::perform(
+                                crate::fetch::fetch_html(fetch_url),
+                                move |result| {
+                                    mapper(Action::FetchComplete(view_id, url_str, result))
+                                },
+                            ));
+                        } else {
+                            eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
+                        }
+                    }
+
+                    #[cfg(not(any(feature = "litehtml", feature = "blitz")))]
+                    if !self.engine.handles_urls() {
                         eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
                     }
                 }
-
-                #[cfg(not(any(feature = "litehtml", feature = "blitz")))]
-                if !self.engine.handles_urls() {
-                    eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
-                }
             }
             Action::Refresh => {
-                self.engine.refresh(self.get_current_view_id());
+                if let Some(view_id) = self.get_current_view_id() {
+                    self.engine.refresh(view_id);
+                }
             }
             Action::SendKeyboardEvent(event) => {
-                self.engine
-                    .handle_keyboard_event(self.get_current_view_id(), event);
+                if let Some(view_id) = self.get_current_view_id() {
+                    self.engine.handle_keyboard_event(view_id, event);
+                }
             }
             Action::SendMouseEvent(event, point) => {
-                let view_id = self.get_current_view_id();
-                self.engine.handle_mouse_event(view_id, point, event);
+                if let Some(view_id) = self.get_current_view_id() {
+                    self.engine.handle_mouse_event(view_id, point, event);
 
-                // Check if the click triggered an anchor navigation
-                if let Some(href) = self.engine.take_anchor_click(view_id) {
-                    let current = self.engine.get_url(view_id);
-                    let base = Url::parse(&current).ok();
-                    match Url::parse(&href).or_else(|_| {
-                        base.as_ref()
-                            .ok_or(url::ParseError::RelativeUrlWithoutBase)
-                            .and_then(|b| b.join(&href))
-                    }) {
-                        Ok(resolved) => {
-                            let scheme = resolved.scheme();
-                            if scheme == "http" || scheme == "https" {
-                                let is_same_page = base
-                                    .as_ref()
-                                    .is_some_and(|cur| crate::util::is_same_page(&resolved, cur));
-                                if is_same_page {
-                                    if let Some(fragment) = resolved.fragment() {
-                                        self.engine.scroll_to_fragment(view_id, fragment);
+                    // Check if the click triggered an anchor navigation
+                    if let Some(href) = self.engine.take_anchor_click(view_id) {
+                        let current = self.engine.get_url(view_id);
+                        let base = Url::parse(&current).ok();
+                        match Url::parse(&href).or_else(|_| {
+                            base.as_ref()
+                                .ok_or(url::ParseError::RelativeUrlWithoutBase)
+                                .and_then(|b| b.join(&href))
+                        }) {
+                            Ok(resolved) => {
+                                let scheme = resolved.scheme();
+                                if scheme == "http" || scheme == "https" {
+                                    let is_same_page = base.as_ref().is_some_and(|cur| {
+                                        crate::util::is_same_page(&resolved, cur)
+                                    });
+                                    if is_same_page {
+                                        if let Some(fragment) = resolved.fragment() {
+                                            self.engine.scroll_to_fragment(view_id, fragment);
+                                        }
+                                    } else {
+                                        tasks.push(self.update(Action::GoToUrl(resolved)));
                                     }
-                                } else {
-                                    tasks.push(self.update(Action::GoToUrl(resolved)));
                                 }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("iced_webview: failed to resolve anchor URL '{href}': {e}");
+                            Err(e) => {
+                                eprintln!(
+                                    "iced_webview: failed to resolve anchor URL '{href}': {e}"
+                                );
+                            }
                         }
                     }
                 }
@@ -352,8 +379,7 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
             }
             Action::Update => {
                 self.engine.update();
-                if self.current_view_index.is_some() {
-                    let view_id = self.get_current_view_id();
+                if let Some(view_id) = self.get_current_view_id() {
                     self.engine.request_render(view_id, self.view_size);
 
                     // Flush staged images only when all fetches are done,
@@ -413,8 +439,8 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                 }
             }
             Action::CopySelection => {
-                if self.current_view_index.is_some() {
-                    if let Some(text) = self.engine.get_selected_text(self.get_current_view_id()) {
+                if let Some(view_id) = self.get_current_view_id() {
+                    if let Some(text) = self.engine.get_selected_text(view_id) {
                         if let Some(on_copy) = &self.on_copy {
                             tasks.push(Task::done((on_copy)(text)));
                         }
@@ -469,9 +495,8 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
             }
         };
 
-        if self.current_view_index.is_some() {
-            self.engine
-                .request_render(self.get_current_view_id(), self.view_size);
+        if let Some(view_id) = self.get_current_view_id() {
+            self.engine.request_render(view_id, self.view_size);
         }
 
         Task::batch(tasks)
@@ -479,7 +504,10 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
 
     /// Returns webview widget for the current view
     pub fn view<'a, T: 'a>(&'a self) -> Element<'a, Action, T> {
-        let id = self.get_current_view_id();
+        let id = match self.get_current_view_id() {
+            Some(id) => id,
+            None => return iced::widget::Column::new().into(),
+        };
         let content_height = self.engine.get_content_height(id);
 
         if content_height > 0.0 {
@@ -525,8 +553,9 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
     }
 
     /// Get the current view's image info for direct rendering
-    pub fn current_image(&self) -> &crate::ImageInfo {
-        self.engine.get_view(self.get_current_view_id())
+    pub fn current_image(&self) -> Option<&crate::ImageInfo> {
+        self.get_current_view_id()
+            .map(|id| self.engine.get_view(id))
     }
 }
 

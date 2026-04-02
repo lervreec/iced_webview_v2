@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Widget crash on stale/invalid view index — lookups now return Option with graceful fallback
+- CEF pixel buffer integer overflow — checked arithmetic prevents buffer over-read on corrupted dimensions
+- Advanced widget HiDPI scaling — scroll offset and content height now scaled correctly
+
 ## [0.1.5] - 2026-03-13
 
 ### Added

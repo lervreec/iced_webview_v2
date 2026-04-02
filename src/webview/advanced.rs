@@ -466,6 +466,7 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                 self.engine.get_selection_rects(id),
                 self.engine.get_scroll_y(id),
                 content_height,
+                self.scale_factor,
             )
             .into()
         } else {
@@ -490,6 +491,7 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                     self.engine.get_selection_rects(id),
                     0.0,
                     0.0,
+                    self.scale_factor,
                 )
                 .into()
             }
@@ -608,6 +610,7 @@ struct WebViewWidget<'a> {
     selection_rects: &'a [[f32; 4]],
     scroll_y: f32,
     content_height: f32,
+    scale_factor: f32,
 }
 
 impl<'a> WebViewWidget<'a> {
@@ -619,6 +622,7 @@ impl<'a> WebViewWidget<'a> {
         selection_rects: &'a [[f32; 4]],
         scroll_y: f32,
         content_height: f32,
+        scale_factor: f32,
     ) -> Self {
         Self {
             id,
@@ -628,6 +632,7 @@ impl<'a> WebViewWidget<'a> {
             selection_rects,
             scroll_y,
             content_height,
+            scale_factor,
         }
     }
 }
@@ -666,12 +671,13 @@ where
         let bounds = layout.bounds();
 
         if self.content_height > 0.0 {
+            let s = self.scale_factor;
             renderer.with_layer(bounds, |renderer| {
                 let image_bounds = Rectangle {
                     x: bounds.x,
-                    y: bounds.y - self.scroll_y,
+                    y: bounds.y - self.scroll_y * s,
                     width: bounds.width,
-                    height: self.content_height,
+                    height: self.content_height * s,
                 };
                 renderer.draw_image(
                     core_image::Image::new(self.handle.clone()).snap(true),
