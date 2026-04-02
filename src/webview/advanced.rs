@@ -51,7 +51,19 @@ pub enum Action {
     ImageFetchComplete(ViewId, String, Result<Vec<u8>, String>, bool, u64),
 }
 
-/// The Advanced WebView widget that creates and shows webview(s)
+/// The Advanced WebView widget that creates and shows webview(s).
+///
+/// **Important:** You must drive the webview with a periodic
+/// [`Action::Update`] / [`Action::UpdateAll`] subscription (e.g. via
+/// `iced::time::every`). Without it the webview will never render and the
+/// screen stays blank.
+///
+/// ```rust,ignore
+/// fn subscription(&self) -> iced::Subscription<Message> {
+///     iced::time::every(std::time::Duration::from_millis(16))
+///         .map(|_| Message::WebView(Action::UpdateAll))
+/// }
+/// ```
 pub struct WebView<Engine, Message>
 where
     Engine: engines::Engine,
@@ -141,9 +153,10 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
         self
     }
 
-    /// Provide a mapper from Action to Message so the webview can spawn async
-    /// tasks (e.g. URL fetches) that route back through the update loop.
-    /// Required for URL navigation on engines that don't handle URLs natively.
+    /// Provide a mapper from [`Action`] to `Message` so the webview can spawn
+    /// async tasks that route back through the iced update loop. **Required**
+    /// for litehtml and blitz engines — without it, URL navigation and image
+    /// loading will not work.
     pub fn on_action(mut self, mapper: impl Fn(Action) -> Message + Send + Sync + 'static) -> Self {
         self.action_mapper = Some(Arc::new(mapper));
         self
@@ -198,11 +211,11 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                                 move |result| mapper(Action::FetchComplete(id, url_clone, result)),
                             ));
                         } else {
-                            eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
+                            eprintln!("iced_webview: .on_action() is required for URL navigation and image loading when the engine does not handle URLs natively. Call .on_action(Message::YourVariant) on your WebView builder.");
                         }
 
                         #[cfg(not(any(feature = "litehtml", feature = "blitz")))]
-                        eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
+                        eprintln!("iced_webview: .on_action() is required for URL navigation and image loading when the engine does not handle URLs natively. Call .on_action(Message::YourVariant) on your WebView builder.");
 
                         id
                     } else {
@@ -245,13 +258,13 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                             move |result| mapper(Action::FetchComplete(id, url_str, result)),
                         ));
                     } else {
-                        eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
+                        eprintln!("iced_webview: .on_action() is required for URL navigation and image loading when the engine does not handle URLs natively. Call .on_action(Message::YourVariant) on your WebView builder.");
                     }
                 }
 
                 #[cfg(not(any(feature = "litehtml", feature = "blitz")))]
                 if !self.engine.handles_urls() {
-                    eprintln!("iced_webview: on_action() mapper required for URL navigation with this engine");
+                    eprintln!("iced_webview: .on_action() is required for URL navigation and image loading when the engine does not handle URLs natively. Call .on_action(Message::YourVariant) on your WebView builder.");
                 }
 
                 self.engine.request_render(id, self.view_size);

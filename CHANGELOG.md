@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- Doc comments on WebView structs noting the required `Action::Update` subscription
+- Improved `on_action()` docs — now states it's required for litehtml/blitz engines
+
 ### Changed
 - Reduced hot-path allocations — URL/title strings moved instead of cloned, pixel buffer avoids double copy
+- `on_action()` error messages now suggest the fix; doc comments name affected engines
 
 ### Fixed
 - Widget crash on stale/invalid view index — lookups now return Option with graceful fallback
