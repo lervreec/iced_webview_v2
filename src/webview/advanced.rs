@@ -154,21 +154,21 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
         let mut tasks = Vec::new();
 
         // Check url & title for changes and callback if so
-        for (id, url) in self.urls.iter_mut() {
-            if let Some(on_url_change) = &self.on_url_change {
+        if let Some(on_url_change) = &self.on_url_change {
+            for (id, url) in self.urls.iter_mut() {
                 let engine_url = self.engine.get_url(*id);
                 if *url != engine_url {
-                    *url = engine_url.clone();
-                    tasks.push(Task::done(on_url_change(*id, engine_url)));
+                    tasks.push(Task::done(on_url_change(*id, engine_url.clone())));
+                    *url = engine_url;
                 }
             }
         }
-        for (id, title) in self.titles.iter_mut() {
-            if let Some(on_title_change) = &self.on_title_change {
+        if let Some(on_title_change) = &self.on_title_change {
+            for (id, title) in self.titles.iter_mut() {
                 let engine_title = self.engine.get_title(*id);
                 if *title != engine_title {
-                    *title = engine_title.clone();
-                    tasks.push(Task::done(on_title_change(*id, engine_title)));
+                    tasks.push(Task::done(on_title_change(*id, engine_title.clone())));
+                    *title = engine_title;
                 }
             }
         }

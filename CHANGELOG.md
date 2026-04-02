@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Reduced hot-path allocations — URL/title strings moved instead of cloned, pixel buffer avoids double copy
+
 ### Fixed
 - Widget crash on stale/invalid view index — lookups now return Option with graceful fallback
 - CEF pixel buffer integer overflow — checked arithmetic prevents buffer over-read on corrupted dimensions

@@ -88,11 +88,11 @@ impl ImageInfo {
             pixels.chunks_mut(4).for_each(|chunk| chunk.swap(0, 2));
         }
 
-        let raw_pixels = Arc::new(pixels.clone());
+        let raw_pixels = Arc::new(pixels);
         Self {
             width,
             height,
-            handle: image::Handle::from_rgba(width, height, pixels),
+            handle: image::Handle::from_rgba(width, height, (*raw_pixels).clone()),
             raw_pixels,
         }
     }

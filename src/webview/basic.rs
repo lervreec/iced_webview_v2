@@ -181,15 +181,15 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
             if let Some(on_url_change) = &self.on_url_change {
                 let url = self.engine.get_url(view_id);
                 if self.url != url {
-                    self.url = url.clone();
-                    tasks.push(Task::done(on_url_change(url)))
+                    tasks.push(Task::done(on_url_change(url.clone())));
+                    self.url = url;
                 }
             }
             if let Some(on_title_change) = &self.on_title_change {
                 let title = self.engine.get_title(view_id);
                 if self.title != title {
-                    self.title = title.clone();
-                    tasks.push(Task::done(on_title_change(title)))
+                    tasks.push(Task::done(on_title_change(title.clone())));
+                    self.title = title;
                 }
             }
         }
