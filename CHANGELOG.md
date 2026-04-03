@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.6] - 2026-04-03
 
 ### Added
 - `.with_initial_size()` builder method for setting viewport size before first resize
