@@ -5,9 +5,8 @@ use std::rc::Rc;
 use iced::keyboard;
 use iced::mouse::{self, Interaction};
 use iced::{Point, Size};
-use rand::Rng;
 
-use super::{Engine, PageType, PixelFormat, ViewId};
+use super::{Engine, PageType, PixelFormat, ViewId, ViewManager};
 use crate::ImageInfo;
 
 // Pull in all CEF types, traits, and macros. The wrap_*! macros reference
@@ -185,7 +184,6 @@ wrap_client! {
 }
 
 struct CefView {
-    id: ViewId,
     browser: Browser,
     shared: Rc<RefCell<SharedState>>,
     url: String,
@@ -223,7 +221,7 @@ struct CefView {
 /// }
 /// ```
 pub struct Cef {
-    views: Vec<CefView>,
+    views: ViewManager<CefView>,
     scale_factor: f32,
     initialized: bool,
     mouse_modifiers: u32,
@@ -273,7 +271,7 @@ impl Default for Cef {
         );
 
         Self {
-            views: Vec::new(),
+            views: ViewManager::default(),
             scale_factor: 1.0,
             initialized: result == 1,
             mouse_modifiers: 0,
@@ -333,23 +331,14 @@ pub fn cef_subprocess_check() -> bool {
 
 impl Drop for Cef {
     fn drop(&mut self) {
-        for view in &self.views {
+        for view in self.views.values() {
             if let Some(host) = view.browser.host() {
                 host.close_browser(1);
             }
         }
-        self.views.clear();
+        // Drop all views before calling shutdown so CEF releases its resources.
+        self.views = ViewManager::default();
         shutdown();
-    }
-}
-
-impl Cef {
-    fn find_view(&self, id: ViewId) -> Option<&CefView> {
-        self.views.iter().find(|v| v.id == id)
-    }
-
-    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut CefView> {
-        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -388,7 +377,7 @@ impl Engine for Cef {
 
         do_message_loop_work();
 
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             let mut shared = view.shared.borrow_mut();
 
             if let Some((pixels, w, h)) = shared.frame_buffer.take() {
@@ -414,7 +403,6 @@ impl Engine for Cef {
     }
 
     fn new_view(&mut self, size: Size<u32>, content: Option<PageType>) -> ViewId {
-        let id = rand::thread_rng().gen();
         let w = size.width.max(1);
         let h = size.height.max(1);
         let size = Size::new(w, h);
@@ -466,7 +454,6 @@ impl Engine for Cef {
         .expect("CEF browser creation failed");
 
         let view = CefView {
-            id,
             browser,
             shared,
             url: url_str,
@@ -476,30 +463,28 @@ impl Engine for Cef {
             needs_render: true,
             size,
         };
-        self.views.push(view);
-        id
+        self.views.insert(view)
     }
 
     fn remove_view(&mut self, id: ViewId) {
-        if let Some(pos) = self.views.iter().position(|v| v.id == id) {
-            let view = &self.views[pos];
+        if let Some(view) = self.views.get(id) {
             if let Some(host) = view.browser.host() {
                 host.close_browser(1);
             }
-            self.views.remove(pos);
         }
+        self.views.remove(id);
     }
 
     fn has_view(&self, id: ViewId) -> bool {
-        self.views.iter().any(|v| v.id == id)
+        self.views.contains(id)
     }
 
     fn view_ids(&self) -> Vec<ViewId> {
-        self.views.iter().map(|v| v.id).collect()
+        self.views.keys()
     }
 
     fn focus(&mut self) {
-        if let Some(view) = self.views.last() {
+        if let Some(view) = self.views.values().next() {
             if let Some(host) = view.browser.host() {
                 host.set_focus(1);
             }
@@ -507,7 +492,7 @@ impl Engine for Cef {
     }
 
     fn unfocus(&self) {
-        if let Some(view) = self.views.last() {
+        if let Some(view) = self.views.values().next() {
             if let Some(host) = view.browser.host() {
                 host.set_focus(0);
             }
@@ -518,7 +503,7 @@ impl Engine for Cef {
         let w = size.width.max(1);
         let h = size.height.max(1);
         let new_size = Size::new(w, h);
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.size = new_size;
             view.shared.borrow_mut().size = new_size;
             if let Some(host) = view.browser.host() {
@@ -533,7 +518,7 @@ impl Engine for Cef {
             return;
         }
         self.scale_factor = scale;
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.shared.borrow_mut().scale_factor = scale;
             if let Some(host) = view.browser.host() {
                 host.notify_screen_info_changed();
@@ -545,7 +530,7 @@ impl Engine for Cef {
 
     fn handle_keyboard_event(&mut self, id: ViewId, event: keyboard::Event) {
         self.mouse_modifiers = iced_modifiers_to_cef(&event);
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if let Some(host) = view.browser.host() {
@@ -557,7 +542,7 @@ impl Engine for Cef {
 
     fn handle_mouse_event(&mut self, id: ViewId, point: Point, event: mouse::Event) {
         let modifiers = self.mouse_modifiers;
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         let Some(host) = view.browser.host() else {
@@ -597,7 +582,7 @@ impl Engine for Cef {
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
         let modifiers = self.mouse_modifiers;
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         let Some(host) = view.browser.host() else {
@@ -619,7 +604,7 @@ impl Engine for Cef {
     }
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         let Some(frame) = view.browser.main_frame() else {
@@ -644,25 +629,25 @@ impl Engine for Cef {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        if let Some(view) = self.find_view(id) {
+        if let Some(view) = self.views.get(id) {
             view.browser.reload();
         }
     }
 
     fn go_forward(&mut self, id: ViewId) {
-        if let Some(view) = self.find_view(id) {
+        if let Some(view) = self.views.get(id) {
             view.browser.go_forward();
         }
     }
 
     fn go_back(&mut self, id: ViewId) {
-        if let Some(view) = self.find_view(id) {
+        if let Some(view) = self.views.get(id) {
             view.browser.go_back();
         }
     }
 
     fn get_url(&self, id: ViewId) -> String {
-        let Some(view) = self.find_view(id) else {
+        let Some(view) = self.views.get(id) else {
             return "about:blank".to_string();
         };
         if let Some(frame) = view.browser.main_frame() {
@@ -681,20 +666,22 @@ impl Engine for Cef {
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.title.clone())
             .unwrap_or_default()
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.cursor)
             .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
         static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
-        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
+        self.views.get(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 }
 

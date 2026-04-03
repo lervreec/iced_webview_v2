@@ -4,9 +4,8 @@ use std::sync::{Arc, Mutex};
 use iced::keyboard;
 use iced::mouse::{self, Interaction};
 use iced::{Point, Size};
-use rand::Rng;
 
-use super::{Engine, PageType, PixelFormat, ViewId};
+use super::{Engine, PageType, PixelFormat, ViewId, ViewManager};
 use crate::ImageInfo;
 
 use anyrender::render_to_buffer;
@@ -47,7 +46,6 @@ impl ShellProvider for WebviewShell {
 }
 
 struct BlitzView {
-    id: ViewId,
     document: Option<HtmlDocument>,
     net_provider: Arc<dyn NetProvider>,
     nav_capture: Arc<Mutex<Option<String>>>,
@@ -74,7 +72,7 @@ struct BlitzView {
 /// Supports modern CSS (flexbox, grid, Firefox CSS engine via Stylo),
 /// but no JavaScript. Uses `anyrender_vello_cpu` for software rasterization.
 pub struct Blitz {
-    views: Vec<BlitzView>,
+    views: ViewManager<BlitzView>,
     scale_factor: f32,
     color_scheme: ColorScheme,
 }
@@ -97,20 +95,10 @@ fn detect_color_scheme() -> ColorScheme {
 impl Default for Blitz {
     fn default() -> Self {
         Self {
-            views: Vec::new(),
+            views: ViewManager::default(),
             scale_factor: 1.0,
             color_scheme: detect_color_scheme(),
         }
-    }
-}
-
-impl Blitz {
-    fn find_view(&self, id: ViewId) -> Option<&BlitzView> {
-        self.views.iter().find(|v| v.id == id)
-    }
-
-    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut BlitzView> {
-        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -263,7 +251,7 @@ impl Engine for Blitz {
     }
 
     fn update(&mut self) {
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             if view.resource_ticks > 0 {
                 view.resource_ticks -= 1;
                 if view.resource_ticks % RESOLVE_INTERVAL == 0 {
@@ -275,7 +263,7 @@ impl Engine for Blitz {
     }
 
     fn render(&mut self, _size: Size<u32>) {
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             if view.needs_render {
                 render_view(view);
             }
@@ -283,7 +271,7 @@ impl Engine for Blitz {
     }
 
     fn request_render(&mut self, id: ViewId, _size: Size<u32>) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if view.needs_render {
@@ -292,7 +280,6 @@ impl Engine for Blitz {
     }
 
     fn new_view(&mut self, size: Size<u32>, content: Option<PageType>) -> ViewId {
-        let id = rand::thread_rng().gen();
         let w = size.width.max(1);
         let h = size.height.max(1);
         let size = Size::new(w, h);
@@ -328,7 +315,6 @@ impl Engine for Blitz {
         let has_document = document.is_some();
 
         let mut view = BlitzView {
-            id,
             document,
             net_provider: net,
             nav_capture,
@@ -351,20 +337,19 @@ impl Engine for Blitz {
         };
 
         render_view(&mut view);
-        self.views.push(view);
-        id
+        self.views.insert(view)
     }
 
     fn remove_view(&mut self, id: ViewId) {
-        self.views.retain(|v| v.id != id);
+        self.views.remove(id);
     }
 
     fn has_view(&self, id: ViewId) -> bool {
-        self.views.iter().any(|v| v.id == id)
+        self.views.contains(id)
     }
 
     fn view_ids(&self) -> Vec<ViewId> {
-        self.views.iter().map(|v| v.id).collect()
+        self.views.keys()
     }
 
     fn focus(&mut self) {}
@@ -372,7 +357,7 @@ impl Engine for Blitz {
     fn unfocus(&self) {}
 
     fn resize(&mut self, size: Size<u32>) {
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.size = size;
             if let Some(ref mut doc) = view.document {
                 let scale = view.scale;
@@ -392,7 +377,7 @@ impl Engine for Blitz {
             return;
         }
         self.scale_factor = scale;
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.scale = scale;
             if let Some(ref mut doc) = view.document {
                 let phys_w = (view.size.width as f32 * scale) as u32;
@@ -408,7 +393,7 @@ impl Engine for Blitz {
     }
 
     fn handle_keyboard_event(&mut self, id: ViewId, event: keyboard::Event) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if let Some(ref mut doc) = view.document {
@@ -441,7 +426,7 @@ impl Engine for Blitz {
                     mouse::Button::Forward => (MouseEventButton::Fifth, MouseEventButtons::Fifth),
                     _ => return,
                 };
-                let Some(view) = self.find_view_mut(id) else {
+                let Some(view) = self.views.get_mut(id) else {
                     return;
                 };
                 if let Some(ref mut doc) = view.document {
@@ -465,7 +450,7 @@ impl Engine for Blitz {
                 }
             }
             mouse::Event::CursorMoved { .. } => {
-                let Some(view) = self.find_view_mut(id) else {
+                let Some(view) = self.views.get_mut(id) else {
                     return;
                 };
                 if let Some(ref mut doc) = view.document {
@@ -486,7 +471,7 @@ impl Engine for Blitz {
                     mouse::Button::Forward => MouseEventButton::Fifth,
                     _ => return,
                 };
-                let Some(view) = self.find_view_mut(id) else {
+                let Some(view) = self.views.get_mut(id) else {
                     return;
                 };
                 if let Some(ref mut doc) = view.document {
@@ -510,7 +495,7 @@ impl Engine for Blitz {
                 }
             }
             mouse::Event::CursorLeft => {
-                if let Some(view) = self.find_view_mut(id) {
+                if let Some(view) = self.views.get_mut(id) {
                     view.cursor = Interaction::Idle;
                 }
             }
@@ -519,7 +504,7 @@ impl Engine for Blitz {
     }
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         match delta {
@@ -536,7 +521,7 @@ impl Engine for Blitz {
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
         let color_scheme = self.color_scheme;
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         match page_type {
@@ -569,7 +554,7 @@ impl Engine for Blitz {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if let Some(ref mut doc) = view.document {
@@ -583,7 +568,7 @@ impl Engine for Blitz {
     fn go_back(&mut self, _id: ViewId) {}
 
     fn get_url(&self, id: ViewId) -> String {
-        let Some(view) = self.find_view(id) else {
+        let Some(view) = self.views.get(id) else {
             return "about:blank".to_string();
         };
         if view.url.is_empty() {
@@ -594,32 +579,34 @@ impl Engine for Blitz {
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.title.clone())
             .unwrap_or_default()
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.cursor)
             .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
         static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
-        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
+        self.views.get(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 
     fn get_scroll_y(&self, id: ViewId) -> f32 {
-        self.find_view(id).map(|v| v.scroll_y).unwrap_or(0.0)
+        self.views.get(id).map(|v| v.scroll_y).unwrap_or(0.0)
     }
 
     fn get_content_height(&self, id: ViewId) -> f32 {
-        self.find_view(id).map(|v| v.content_height).unwrap_or(0.0)
+        self.views.get(id).map(|v| v.content_height).unwrap_or(0.0)
     }
 
     fn scroll_to_fragment(&mut self, id: ViewId, fragment: &str) -> bool {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return false;
         };
         let doc = match view.document.as_ref() {
@@ -648,7 +635,7 @@ impl Engine for Blitz {
     }
 
     fn take_anchor_click(&mut self, id: ViewId) -> Option<String> {
-        self.find_view_mut(id)?.nav_capture.lock().unwrap().take()
+        self.views.get_mut(id)?.nav_capture.lock().unwrap().take()
     }
 }
 

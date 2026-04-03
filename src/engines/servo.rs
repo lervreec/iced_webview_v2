@@ -4,9 +4,8 @@ use std::rc::Rc;
 use iced::keyboard;
 use iced::mouse::{self, Interaction};
 use iced::{Point, Size};
-use rand::Rng;
 
-use super::{Engine, PageType, PixelFormat, ViewId};
+use super::{Engine, PageType, PixelFormat, ViewId, ViewManager};
 use crate::ImageInfo;
 
 use dpi::PhysicalSize;
@@ -63,7 +62,6 @@ impl WebViewDelegate for ViewDelegate {
 }
 
 struct ServoView {
-    id: ViewId,
     webview: WebView,
     delegate_state: Rc<DelegateState>,
     url: String,
@@ -92,7 +90,7 @@ struct ServoView {
 pub struct Servo {
     instance: ServoInstance,
     rendering_context: Rc<SoftwareRenderingContext>,
-    views: Vec<ServoView>,
+    views: ViewManager<ServoView>,
     scale_factor: f32,
 }
 
@@ -110,19 +108,9 @@ impl Default for Servo {
         Self {
             instance,
             rendering_context,
-            views: Vec::new(),
+            views: ViewManager::default(),
             scale_factor: 1.0,
         }
-    }
-}
-
-impl Servo {
-    fn find_view(&self, id: ViewId) -> Option<&ServoView> {
-        self.views.iter().find(|v| v.id == id)
-    }
-
-    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut ServoView> {
-        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -174,7 +162,7 @@ impl Engine for Servo {
     fn update(&mut self) {
         self.instance.spin_event_loop();
 
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             // Drain delegate state
             if let Some(url) = view.delegate_state.url.borrow_mut().take() {
                 view.url = url;
@@ -193,17 +181,17 @@ impl Engine for Servo {
     }
 
     fn render(&mut self, _size: Size<u32>) {
-        for i in 0..self.views.len() {
-            if self.views[i].needs_render {
-                let rc = Rc::clone(&self.rendering_context);
-                capture_frame(&mut self.views[i], &rc);
+        let rc = Rc::clone(&self.rendering_context);
+        for view in self.views.values_mut() {
+            if view.needs_render {
+                capture_frame(view, &rc);
             }
         }
     }
 
     fn request_render(&mut self, id: ViewId, _size: Size<u32>) {
         let rc = Rc::clone(&self.rendering_context);
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if view.needs_render {
@@ -212,7 +200,6 @@ impl Engine for Servo {
     }
 
     fn new_view(&mut self, size: Size<u32>, content: Option<PageType>) -> ViewId {
-        let id = rand::thread_rng().gen();
         let w = size.width.max(1);
         let h = size.height.max(1);
         let size = Size::new(w, h);
@@ -254,7 +241,6 @@ impl Engine for Servo {
         webview.resize(PhysicalSize::new(w, h));
 
         let view = ServoView {
-            id,
             webview,
             delegate_state,
             url: url_str,
@@ -265,37 +251,36 @@ impl Engine for Servo {
             size,
             last_cursor: DevicePoint::new(w as f32 / 2.0, h as f32 / 2.0),
         };
-        self.views.push(view);
-        id
+        self.views.insert(view)
     }
 
     fn remove_view(&mut self, id: ViewId) {
-        self.views.retain(|v| v.id != id);
+        self.views.remove(id);
     }
 
     fn has_view(&self, id: ViewId) -> bool {
-        self.views.iter().any(|v| v.id == id)
+        self.views.contains(id)
     }
 
     fn view_ids(&self) -> Vec<ViewId> {
-        self.views.iter().map(|v| v.id).collect()
+        self.views.keys()
     }
 
     fn focus(&mut self) {
-        if let Some(view) = self.views.last() {
+        if let Some(view) = self.views.values().next() {
             view.webview.focus();
         }
     }
 
     fn unfocus(&self) {
-        if let Some(view) = self.views.last() {
+        if let Some(view) = self.views.values().next() {
             view.webview.blur();
         }
     }
 
     fn resize(&mut self, size: Size<u32>) {
         let phys = PhysicalSize::new(size.width.max(1), size.height.max(1));
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.size = size;
             view.webview.resize(phys);
             view.needs_render = true;
@@ -307,7 +292,7 @@ impl Engine for Servo {
             return;
         }
         self.scale_factor = scale;
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.webview.set_hidpi_scale_factor(euclid::Scale::<
                 f32,
                 DeviceIndependentPixel,
@@ -318,7 +303,7 @@ impl Engine for Servo {
     }
 
     fn handle_keyboard_event(&mut self, id: ViewId, event: keyboard::Event) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if let Some(kb) = iced_keyboard_to_servo(event) {
@@ -328,7 +313,7 @@ impl Engine for Servo {
 
     fn handle_mouse_event(&mut self, id: ViewId, point: Point, event: mouse::Event) {
         let device_point = DevicePoint::new(point.x, point.y);
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         view.last_cursor = device_point;
@@ -370,7 +355,7 @@ impl Engine for Servo {
     }
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         let (dx, dy, mode) = match delta {
@@ -391,7 +376,7 @@ impl Engine for Servo {
     }
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         match page_type {
@@ -414,25 +399,25 @@ impl Engine for Servo {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        if let Some(view) = self.find_view(id) {
+        if let Some(view) = self.views.get(id) {
             view.webview.reload();
         }
     }
 
     fn go_forward(&mut self, id: ViewId) {
-        if let Some(view) = self.find_view(id) {
+        if let Some(view) = self.views.get(id) {
             view.webview.go_forward(1);
         }
     }
 
     fn go_back(&mut self, id: ViewId) {
-        if let Some(view) = self.find_view(id) {
+        if let Some(view) = self.views.get(id) {
             view.webview.go_back(1);
         }
     }
 
     fn get_url(&self, id: ViewId) -> String {
-        let Some(view) = self.find_view(id) else {
+        let Some(view) = self.views.get(id) else {
             return "about:blank".to_string();
         };
         if let Some(url) = view.webview.url() {
@@ -445,7 +430,7 @@ impl Engine for Servo {
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        let Some(view) = self.find_view(id) else {
+        let Some(view) = self.views.get(id) else {
             return String::new();
         };
         view.webview
@@ -454,14 +439,15 @@ impl Engine for Servo {
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.cursor)
             .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
         static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
-        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
+        self.views.get(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 }
 

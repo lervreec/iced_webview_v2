@@ -4,10 +4,9 @@ use std::collections::HashMap;
 use iced::keyboard;
 use iced::mouse::{self, Interaction};
 use iced::{Point, Size};
-use rand::Rng;
 use url::Url;
 
-use super::{Engine, PageType, PixelFormat, ViewId};
+use super::{Engine, PageType, PixelFormat, ViewId, ViewManager};
 use crate::ImageInfo;
 
 use litehtml::pixbuf::PixbufContainer;
@@ -216,7 +215,6 @@ struct DocumentState {
 }
 
 struct LitehtmlView {
-    id: ViewId,
     // IMPORTANT: doc_state must be declared before container so it drops first.
     doc_state: Option<DocumentState>,
     container: Box<WebviewContainer>,
@@ -245,26 +243,16 @@ struct LitehtmlView {
 /// No URL navigation, no keyboard input, no JavaScript.
 /// Uses `litehtml::pixbuf::PixbufContainer` for software rasterization.
 pub struct Litehtml {
-    views: Vec<LitehtmlView>,
+    views: ViewManager<LitehtmlView>,
     scale_factor: f32,
 }
 
 impl Default for Litehtml {
     fn default() -> Self {
         Self {
-            views: Vec::new(),
+            views: ViewManager::default(),
             scale_factor: 1.0,
         }
-    }
-}
-
-impl Litehtml {
-    fn find_view(&self, id: ViewId) -> Option<&LitehtmlView> {
-        self.views.iter().find(|v| v.id == id)
-    }
-
-    fn find_view_mut(&mut self, id: ViewId) -> Option<&mut LitehtmlView> {
-        self.views.iter_mut().find(|v| v.id == id)
     }
 }
 
@@ -540,7 +528,7 @@ impl Engine for Litehtml {
     }
 
     fn render(&mut self, _size: Size<u32>) {
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             if view.needs_render {
                 render_view(view);
             }
@@ -548,7 +536,7 @@ impl Engine for Litehtml {
     }
 
     fn request_render(&mut self, id: ViewId, _size: Size<u32>) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if view.needs_render {
@@ -557,7 +545,7 @@ impl Engine for Litehtml {
     }
 
     fn flush_staged_images(&mut self, id: ViewId, _size: Size<u32>) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if !view.staged_images.is_empty() {
@@ -566,7 +554,6 @@ impl Engine for Litehtml {
     }
 
     fn new_view(&mut self, size: Size<u32>, content: Option<PageType>) -> ViewId {
-        let id = rand::thread_rng().gen();
         let w = size.width.max(1);
         let h = size.height.max(1);
 
@@ -580,7 +567,6 @@ impl Engine for Litehtml {
         };
 
         let mut view = LitehtmlView {
-            id,
             doc_state: None,
             container: Box::new(WebviewContainer::new(w, h, self.scale_factor)),
             html,
@@ -599,20 +585,19 @@ impl Engine for Litehtml {
         };
 
         render_view(&mut view);
-        self.views.push(view);
-        id
+        self.views.insert(view)
     }
 
     fn remove_view(&mut self, id: ViewId) {
-        self.views.retain(|v| v.id != id);
+        self.views.remove(id);
     }
 
     fn has_view(&self, id: ViewId) -> bool {
-        self.views.iter().any(|v| v.id == id)
+        self.views.contains(id)
     }
 
     fn view_ids(&self) -> Vec<ViewId> {
-        self.views.iter().map(|v| v.id).collect()
+        self.views.keys()
     }
 
     fn focus(&mut self) {
@@ -624,7 +609,7 @@ impl Engine for Litehtml {
     }
 
     fn resize(&mut self, size: Size<u32>) {
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.doc_state = None;
 
             view.size = size;
@@ -637,7 +622,7 @@ impl Engine for Litehtml {
             return;
         }
         self.scale_factor = scale;
-        for view in &mut self.views {
+        for view in self.views.values_mut() {
             view.doc_state = None;
 
             view.container
@@ -657,7 +642,7 @@ impl Engine for Litehtml {
                 self.scroll(id, delta);
             }
             mouse::Event::ButtonPressed(mouse::Button::Left) => {
-                let Some(view) = self.find_view_mut(id) else {
+                let Some(view) = self.views.get_mut(id) else {
                     return;
                 };
                 view.drag_origin = Some((point.x, point.y));
@@ -670,7 +655,7 @@ impl Engine for Litehtml {
                 view.selection_rects.clear();
             }
             mouse::Event::CursorMoved { .. } => {
-                let Some(view) = self.find_view_mut(id) else {
+                let Some(view) = self.views.get_mut(id) else {
                     return;
                 };
 
@@ -720,7 +705,7 @@ impl Engine for Litehtml {
                 }
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                let Some(view) = self.find_view_mut(id) else {
+                let Some(view) = self.views.get_mut(id) else {
                     return;
                 };
                 let was_dragging = view.drag_active;
@@ -741,7 +726,7 @@ impl Engine for Litehtml {
                 }
             }
             mouse::Event::CursorLeft => {
-                if let Some(view) = self.find_view_mut(id) {
+                if let Some(view) = self.views.get_mut(id) {
                     if let Some(ref mut state) = view.doc_state {
                         state.doc.on_mouse_leave();
                     }
@@ -753,7 +738,7 @@ impl Engine for Litehtml {
     }
 
     fn scroll(&mut self, id: ViewId, delta: mouse::ScrollDelta) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         match delta {
@@ -769,7 +754,7 @@ impl Engine for Litehtml {
     }
 
     fn goto(&mut self, id: ViewId, page_type: PageType) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         match page_type {
@@ -798,7 +783,7 @@ impl Engine for Litehtml {
     }
 
     fn refresh(&mut self, id: ViewId) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         view.doc_state = None;
@@ -815,7 +800,7 @@ impl Engine for Litehtml {
     }
 
     fn get_url(&self, id: ViewId) -> String {
-        let Some(view) = self.find_view(id) else {
+        let Some(view) = self.views.get(id) else {
             return "about:blank".to_string();
         };
         if view.url.is_empty() {
@@ -826,32 +811,35 @@ impl Engine for Litehtml {
     }
 
     fn get_title(&self, id: ViewId) -> String {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.title.clone())
             .unwrap_or_default()
     }
 
     fn get_cursor(&self, id: ViewId) -> Interaction {
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.cursor)
             .unwrap_or(Interaction::Idle)
     }
 
     fn get_view(&self, id: ViewId) -> &ImageInfo {
         static BLANK: std::sync::LazyLock<ImageInfo> = std::sync::LazyLock::new(ImageInfo::default);
-        self.find_view(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
+        self.views.get(id).map(|v| &v.last_frame).unwrap_or(&BLANK)
     }
 
     fn get_scroll_y(&self, id: ViewId) -> f32 {
-        self.find_view(id).map(|v| v.scroll_y).unwrap_or(0.0)
+        self.views.get(id).map(|v| v.scroll_y).unwrap_or(0.0)
     }
 
     fn get_content_height(&self, id: ViewId) -> f32 {
-        self.find_view(id).map(|v| v.content_height).unwrap_or(0.0)
+        self.views.get(id).map(|v| v.content_height).unwrap_or(0.0)
     }
 
     fn get_selected_text(&self, id: ViewId) -> Option<String> {
-        self.find_view(id)?
+        self.views
+            .get(id)?
             .doc_state
             .as_ref()?
             .selection
@@ -860,13 +848,14 @@ impl Engine for Litehtml {
 
     fn get_selection_rects(&self, id: ViewId) -> &[[f32; 4]] {
         static EMPTY: &[[f32; 4]] = &[];
-        self.find_view(id)
+        self.views
+            .get(id)
             .map(|v| v.selection_rects.as_slice())
             .unwrap_or(EMPTY)
     }
 
     fn take_anchor_click(&mut self, id: ViewId) -> Option<String> {
-        let view = self.find_view_mut(id)?;
+        let view = self.views.get_mut(id)?;
         // Take doc_state out to avoid aliasing with container.
         let doc_state = view.doc_state.take();
         let result = view.container.inner_mut().take_anchor_click();
@@ -876,7 +865,7 @@ impl Engine for Litehtml {
 
     fn take_pending_images(&mut self) -> Vec<(ViewId, String, String, bool)> {
         let mut result = Vec::new();
-        for view in &mut self.views {
+        for (id, view) in self.views.iter_mut() {
             // Take doc_state out to avoid aliasing with container.
             let doc_state = view.doc_state.take();
             for (src, redraw_on_ready) in view.container.inner_mut().take_pending_images() {
@@ -887,7 +876,7 @@ impl Engine for Litehtml {
                     .get(&src)
                     .cloned()
                     .unwrap_or_default();
-                result.push((view.id, src, baseurl, redraw_on_ready));
+                result.push((id, src, baseurl, redraw_on_ready));
             }
             view.doc_state = doc_state;
         }
@@ -901,7 +890,7 @@ impl Engine for Litehtml {
         bytes: &[u8],
         redraw_on_ready: bool,
     ) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         if let Some(existing) = view.staged_images.iter_mut().find(|(u, _, _)| u == url) {
@@ -914,7 +903,7 @@ impl Engine for Litehtml {
     }
 
     fn set_css_cache(&mut self, id: ViewId, cache: HashMap<String, String>) {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return;
         };
         // Take doc_state out to avoid aliasing with container.
@@ -924,7 +913,7 @@ impl Engine for Litehtml {
     }
 
     fn scroll_to_fragment(&mut self, id: ViewId, fragment: &str) -> bool {
-        let Some(view) = self.find_view_mut(id) else {
+        let Some(view) = self.views.get_mut(id) else {
             return false;
         };
         let state = match view.doc_state.as_ref() {

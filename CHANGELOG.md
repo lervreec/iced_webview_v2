@@ -10,6 +10,7 @@
 - Improved `on_action()` docs — now states it's required for litehtml/blitz engines
 
 ### Changed
+- Engine view storage refactored to shared `ViewManager<V>` with HashMap for O(1) lookups
 - Advanced WebView urls/titles tracking switched from Vec to HashMap for O(1) lookups
 - Reduced hot-path allocations — URL/title strings moved instead of cloned, pixel buffer avoids double copy
 - `on_action()` error messages now suggest the fix; doc comments name affected engines

@@ -6,6 +6,9 @@ use iced::mouse::{self, Interaction};
 use iced::Point;
 use iced::Size;
 
+mod view_manager;
+pub use view_manager::ViewManager;
+
 /// A Blitz implementation of Engine (Stylo + Taffy + Vello)
 #[cfg(feature = "blitz")]
 pub mod blitz;
