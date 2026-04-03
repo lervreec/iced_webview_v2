@@ -185,6 +185,13 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
         self
     }
 
+    /// Set the initial viewport size used before the first resize event.
+    /// Defaults to 1920x1080.
+    pub fn with_initial_size(mut self, size: Size<u32>) -> Self {
+        self.view_size = size;
+        self
+    }
+
     /// Passes update to webview
     pub fn update(&mut self, action: Action) -> Task<Message> {
         let mut tasks = Vec::new();
@@ -568,6 +575,16 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
     pub fn current_image(&self) -> Option<&crate::ImageInfo> {
         self.get_current_view_id()
             .map(|id| self.engine.get_view(id))
+    }
+
+    /// Get the current view's URL
+    pub fn current_url(&self) -> &str {
+        &self.url
+    }
+
+    /// Get the current view's title
+    pub fn current_title(&self) -> &str {
+        &self.title
     }
 }
 

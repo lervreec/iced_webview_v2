@@ -74,9 +74,9 @@ where
     on_close_view: Option<Box<dyn Fn(ViewId) -> Message>>,
     on_create_view: Option<Box<dyn Fn(ViewId) -> Message>>,
     on_url_change: Option<Box<dyn Fn(ViewId, String) -> Message>>,
-    urls: Vec<(ViewId, String)>,
+    urls: HashMap<ViewId, String>,
     on_title_change: Option<Box<dyn Fn(ViewId, String) -> Message>>,
-    titles: Vec<(ViewId, String)>,
+    titles: HashMap<ViewId, String>,
     on_copy: Option<Box<dyn Fn(String) -> Message>>,
     action_mapper: Option<Arc<dyn Fn(Action) -> Message + Send + Sync>>,
     inflight_images: usize,
@@ -94,9 +94,9 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> Default
             on_close_view: None,
             on_create_view: None,
             on_url_change: None,
-            urls: Vec::new(),
+            urls: HashMap::new(),
             on_title_change: None,
-            titles: Vec::new(),
+            titles: HashMap::new(),
             on_copy: None,
             action_mapper: None,
             inflight_images: 0,
@@ -162,6 +162,13 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
         self
     }
 
+    /// Set the initial viewport size used before the first resize event.
+    /// Defaults to 1920x1080.
+    pub fn with_initial_size(mut self, size: Size<u32>) -> Self {
+        self.view_size = size;
+        self
+    }
+
     /// Passes update to webview
     pub fn update(&mut self, action: Action) -> Task<Message> {
         let mut tasks = Vec::new();
@@ -189,8 +196,8 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
         match action {
             Action::CloseView(id) => {
                 self.engine.remove_view(id);
-                self.urls.retain(|url| url.0 != id);
-                self.titles.retain(|title| title.0 != id);
+                self.urls.remove(&id);
+                self.titles.remove(&id);
 
                 if let Some(on_view_close) = &self.on_close_view {
                     tasks.push(Task::done((on_view_close)(id)))
@@ -226,8 +233,8 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
                     self.engine.new_view(self.view_size, Some(page_type))
                 };
 
-                self.urls.push((id, String::new()));
-                self.titles.push((id, String::new()));
+                self.urls.insert(id, String::new());
+                self.titles.insert(id, String::new());
 
                 if let Some(on_view_create) = &self.on_create_view {
                     tasks.push(Task::done((on_view_create)(id)))
@@ -464,6 +471,16 @@ impl<Engine: engines::Engine + Default, Message: Send + Clone + 'static> WebView
         };
 
         Task::batch(tasks)
+    }
+
+    /// Get the URL for a specific view
+    pub fn url_for(&self, id: ViewId) -> Option<&str> {
+        self.urls.get(&id).map(|s| s.as_str())
+    }
+
+    /// Get the title for a specific view
+    pub fn title_for(&self, id: ViewId) -> Option<&str> {
+        self.titles.get(&id).map(|s| s.as_str())
     }
 
     /// Like a normal `view()` method in iced, but takes an id of the desired view

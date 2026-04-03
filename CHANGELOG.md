@@ -3,14 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- `.with_initial_size()` builder method for setting viewport size before first resize
+- `current_url()` / `current_title()` getters on basic WebView
+- `url_for(id)` / `title_for(id)` getters on advanced WebView
 - Doc comments on WebView structs noting the required `Action::Update` subscription
 - Improved `on_action()` docs — now states it's required for litehtml/blitz engines
 
 ### Changed
+- Advanced WebView urls/titles tracking switched from Vec to HashMap for O(1) lookups
 - Reduced hot-path allocations — URL/title strings moved instead of cloned, pixel buffer avoids double copy
 - `on_action()` error messages now suggest the fix; doc comments name affected engines
 
 ### Fixed
+- ImageInfo::blank() integer overflow — checked arithmetic with fallback to 1x1
 - Widget crash on stale/invalid view index — lookups now return Option with graceful fallback
 - CEF pixel buffer integer overflow — checked arithmetic prevents buffer over-read on corrupted dimensions
 - Advanced widget HiDPI scaling — scroll offset and content height now scaled correctly

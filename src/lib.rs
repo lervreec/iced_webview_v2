@@ -64,14 +64,7 @@ pub struct ImageInfo {
 
 impl Default for ImageInfo {
     fn default() -> Self {
-        let pixels = vec![255; (Self::WIDTH as usize * Self::HEIGHT as usize) * 4];
-        let raw_pixels = Arc::new(pixels.clone());
-        Self {
-            width: Self::WIDTH,
-            height: Self::HEIGHT,
-            handle: image::Handle::from_rgba(Self::WIDTH, Self::HEIGHT, pixels),
-            raw_pixels,
-        }
+        Self::blank(Self::WIDTH, Self::HEIGHT)
     }
 }
 
@@ -118,12 +111,17 @@ impl ImageInfo {
     }
 
     fn blank(width: u32, height: u32) -> Self {
-        let pixels = vec![255; (width as usize * height as usize) * 4];
+        let (w, h) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .map_or((1u32, 1u32), |_| (width, height));
+
+        let pixels = vec![255; (w as usize * h as usize) * 4];
         let raw_pixels = Arc::new(pixels.clone());
         Self {
-            width,
-            height,
-            handle: image::Handle::from_rgba(width, height, pixels),
+            width: w,
+            height: h,
+            handle: image::Handle::from_rgba(w, h, pixels),
             raw_pixels,
         }
     }
