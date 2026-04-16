@@ -66,7 +66,7 @@ smol_str = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true }
 
 # Servo engine deps
-servo = { git = "https://github.com/servo/servo", branch = "main", package = "libservo", optional = true }
+servo = { git = "https://github.com/servo/servo", branch = "main", package = "servo", optional = true }
 urlencoding = { version = "2", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"], optional = true }
 euclid = { version = "0.22", optional = true }
